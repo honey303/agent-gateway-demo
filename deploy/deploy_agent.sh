@@ -3,7 +3,13 @@
 # Engine), via the adk CLI.
 #
 # Before running this:
-#   1. cp mcp_agent/.env.example mcp_agent/.env, then fill in
+#   1. pip install -r deploy/requirements.txt
+#      `adk deploy agent_engine` needs `vertexai` (from google-cloud-aiplatform)
+#      to actually perform the deploy - it's NOT pulled in by
+#      mcp_agent/requirements.txt (google-adk[mcp]), which only covers what
+#      the deployed agent itself needs at runtime. Skipping this fails with
+#      "ModuleNotFoundError: No module named 'vertexai'".
+#   2. cp mcp_agent/.env.example mcp_agent/.env, then fill in
 #      GOOGLE_CLOUD_PROJECT and MCP_SERVER_URL (see deploy_mcp_server.sh).
 #      `adk deploy agent_engine` packages this .env and ships its values as
 #      the deployed agent's environment variables.
@@ -31,6 +37,13 @@ ENV_FILE="${REPO_ROOT}/mcp_agent/.env"
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "Missing ${ENV_FILE}." >&2
   echo "Run: cp mcp_agent/.env.example mcp_agent/.env, fill it in, then retry." >&2
+  exit 1
+fi
+
+if ! python3 -c "import vertexai" >/dev/null 2>&1; then
+  echo "Missing the 'vertexai' module (needed by 'adk deploy agent_engine'" >&2
+  echo "itself, not just the deployed agent)." >&2
+  echo "Run: pip install -r deploy/requirements.txt, then retry." >&2
   exit 1
 fi
 

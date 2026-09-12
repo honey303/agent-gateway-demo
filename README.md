@@ -121,6 +121,15 @@ to Cloud Run, printing the service URL. Note the URL — you'll need
 
 ## 3. Deploy the agent to Vertex AI Agent Engine
 
+Install the deploy-time tooling first (separate from
+`mcp_agent/requirements.txt`, which only covers what the deployed agent
+needs at *runtime* — `adk deploy agent_engine` itself additionally needs
+`vertexai`, which isn't pulled in by that file):
+
+```bash
+pip install -r deploy/requirements.txt
+```
+
 Update `mcp_agent/.env` with the real values:
 
 ```dotenv
