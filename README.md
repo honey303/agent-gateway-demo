@@ -104,6 +104,8 @@ should call the corresponding MCP tool and use the result in its reply.
 
 ## 2. Deploy the MCP server to Cloud Run
 
+Already have it deployed? Skip straight to step 3 with its URL.
+
 ```bash
 PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/deploy_mcp_server.sh
 ```
@@ -112,9 +114,10 @@ This builds `mcp_server/` into a container (via Cloud Build) and deploys it
 to Cloud Run, printing the service URL. Note the URL — you'll need
 `<url>/mcp` as `MCP_SERVER_URL`.
 
-> The script uses `--allow-unauthenticated` for demo simplicity, since MCP
-> Streamable HTTP doesn't carry Google credentials on its own. For anything
-> beyond a demo, see **Securing the MCP server** below.
+> The script uses `--allow-unauthenticated` for demo simplicity. This is
+> **not** recommended beyond a demo — see **Securing the MCP server** below,
+> which is now the default behavior of `mcp_agent/agent.py` (it attaches a
+> Google ID token automatically for any `https://` `MCP_SERVER_URL`).
 
 ## 3. Deploy the agent to Vertex AI Agent Engine
 
@@ -125,6 +128,7 @@ GOOGLE_GENAI_USE_ENTERPRISE=1
 GOOGLE_CLOUD_PROJECT=<your-project-id>
 GOOGLE_CLOUD_LOCATION=us-central1
 MCP_SERVER_URL=https://<your-cloud-run-url>/mcp
+# MCP_SERVER_AUTH=auto  # attaches an ID token automatically; see below
 ```
 
 Then deploy with the ADK CLI:
@@ -259,38 +263,38 @@ for event in agent_engine.stream_query(
 
 ## Securing the MCP server
 
-This demo leaves the Cloud Run MCP server publicly reachable
-(`--allow-unauthenticated`) to keep the walkthrough simple.
+Should the call to Cloud Run be unauthenticated? **No** — not beyond a
+quick local test. `mcp_agent/agent.py` handles this for you by default
+(`MCP_SERVER_AUTH=auto`): it attaches a Google-signed ID token, fetched via
+Application Default Credentials, as a bearer header on any `https://`
+`MCP_SERVER_URL`, and skips it for `localhost`/`127.0.0.1`. To make that
+token actually mean something, lock the Cloud Run service down:
 
-If you've set up **Agent Gateway** (step 4 above), it is the recommended
-way to secure this in production: authorization is centrally enforced at
-the gateway via `roles/iap.egressor`, so you don't need to hand-manage
-tokens in the agent's own code. You can then also remove
-`--allow-unauthenticated` from the Cloud Run service.
-
-Without Agent Gateway, lock the MCP server down with Cloud Run's built-in
-IAM auth instead:
-
-1. Redeploy without `--allow-unauthenticated` (or run
-   `gcloud run services remove-iam-policy-binding ... --member=allUsers`).
-2. Grant the Agent Engine's runtime service account the `roles/run.invoker`
-   role on the Cloud Run service.
-3. Have the agent attach a Google-signed ID token as a bearer header, e.g.:
-
-   ```python
-   import google.auth.transport.requests
-   import google.oauth2.id_token
-
-   token = google.oauth2.id_token.fetch_id_token(
-       google.auth.transport.requests.Request(), audience=MCP_SERVER_URL
-   )
-   mcp_toolset = McpToolset(
-       connection_params=StreamableHTTPConnectionParams(
-           url=MCP_SERVER_URL,
-           headers={"Authorization": f"Bearer {token}"},
-       ),
-   )
+1. Redeploy `mcp_server/` **without** `--allow-unauthenticated`, or run:
+   ```bash
+   gcloud run services remove-iam-policy-binding <SERVICE_NAME> \
+     --region=<REGION> --member=allUsers --role=roles/run.invoker
    ```
+2. Grant the agent's runtime identity `roles/run.invoker` on the Cloud Run
+   service:
+   ```bash
+   gcloud run services add-iam-policy-binding <SERVICE_NAME> \
+     --region=<REGION> \
+     --member="serviceAccount:<AGENT_RUNTIME_SERVICE_ACCOUNT>" \
+     --role=roles/run.invoker
+   ```
+   The default runtime identity is
+   `service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`
+   unless you set a custom `service_account` or `identity_type=AGENT_IDENTITY`
+   (see step 4) when deploying.
+
+If you've set up **Agent Gateway** (step 4 above) instead, it becomes the
+enforcement point: authorization is centrally checked via
+`roles/iap.egressor` against Agent Registry. In that setup you can set
+`MCP_SERVER_AUTH=off` in `mcp_agent/.env` (the gateway handles auth, so the
+agent doesn't need to attach its own token) — but leaving it on `auto` is
+harmless too, since Cloud Run simply ignores extra bearer tokens once IAM
+auth is delegated to the gateway.
 
 ## Cleaning up
 
