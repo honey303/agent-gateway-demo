@@ -29,8 +29,64 @@ Authenticating to the MCP server (Cloud Run):
                         Agent Gateway in front of it handles auth instead).
 """
 
+import base64
 import os
+import tempfile
 from urllib.parse import urlparse
+
+
+def _trust_agent_gateway_ca() -> None:
+    """Adds the Agent Gateway's TLS-inspection CA to this process's trust store.
+
+    An Agent-to-Anywhere (egress) Agent Gateway terminates and re-signs the
+    agent's outbound TLS, so *every* outbound HTTPS call fails with
+    CERTIFICATE_VERIFY_FAILED ("self-signed certificate in certificate
+    chain") unless the gateway's CA is trusted - not just tool calls, but
+    ADK's own calls to the managed session service on
+    aiplatform.mtls.googleapis.com, which makes even create_session fail.
+
+    Source-based (non-BYOC) deploys are documented to get this CA injected
+    automatically during image creation. That only covers images built
+    *after* the gateway is attached; attaching a gateway to an
+    already-deployed engine leaves the running image without it, so we add
+    it here at runtime instead.
+
+    Set AGENT_GATEWAY_CA_B64 to the base64 of the gateway's
+    `agentGatewayCard.rootCertificates` PEM - deploy/gateway/trust_gateway_ca.sh
+    writes it into mcp_agent/.env for you. Unset, this is a no-op.
+    """
+    encoded = os.environ.get("AGENT_GATEWAY_CA_B64")
+    if not encoded:
+        return
+
+    try:
+        gateway_ca = base64.b64decode(encoded)
+    except Exception:
+        print("AGENT_GATEWAY_CA_B64 is not valid base64 - skipping CA setup.")
+        return
+
+    # Append to certifi's bundle rather than replacing it: the agent still
+    # needs to verify ordinary public certificates.
+    import certifi
+
+    with open(certifi.where(), "rb") as bundle_file:
+        bundle = bundle_file.read()
+    if not bundle.endswith(b"\n"):
+        bundle += b"\n"
+    bundle += gateway_ca
+
+    handle, path = tempfile.mkstemp(prefix="agw-ca-bundle-", suffix=".pem")
+    with os.fdopen(handle, "wb") as out:
+        out.write(bundle)
+
+    # One variable per consumer: stdlib ssl/aiohttp, requests, and gRPC.
+    os.environ["SSL_CERT_FILE"] = path
+    os.environ["REQUESTS_CA_BUNDLE"] = path
+    os.environ["GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"] = path
+
+
+# Must run before anything builds an SSL context or an API client.
+_trust_agent_gateway_ca()
 
 from google.adk.agents import Agent
 from google.adk.tools.mcp_tool import McpToolset, StreamableHTTPConnectionParams
