@@ -131,27 +131,43 @@ MCP_SERVER_URL=https://<your-cloud-run-url>/mcp
 # MCP_SERVER_AUTH=auto  # attaches an ID token automatically; see below
 ```
 
-Then deploy with the ADK CLI:
+Then deploy:
 
 ```bash
-adk deploy agent_engine \
-  --project=<your-project-id> \
-  --region=us-central1 \
-  --display_name="MCP Gateway Demo Agent" \
-  mcp_agent
+PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/deploy_agent.sh
 ```
 
-This packages `mcp_agent/` (including its `requirements.txt` and `.env`),
-builds a container via Cloud Build, and creates/updates a **Reasoning
-Engine** (Agent Engine) resource in your project. On success it prints the
-deployed resource name, e.g.:
+This is a thin wrapper around the ADK CLI (`adk deploy agent_engine`). It
+packages `mcp_agent/` (including its `requirements.txt` and `.env`), builds
+a container via Cloud Build, and creates/updates a **Reasoning Engine**
+(Agent Engine) resource in your project. On success it prints the deployed
+resource name, e.g.:
 
 ```
 projects/123456789/locations/us-central1/reasoningEngines/987654321
 ```
 
-To redeploy after changes, add `--agent_engine_id=<the numeric id>` so it
-updates the existing resource instead of creating a new one.
+Note it down - you'll need it below and in step 4. To redeploy after
+changes instead of creating a new resource, pass its numeric id:
+
+```bash
+PROJECT_ID=<your-project-id> AGENT_ENGINE_ID=987654321 ./deploy/deploy_agent.sh
+```
+
+Now grant the agent's runtime identity permission to actually call the MCP
+server (`mcp_agent/agent.py` attaches an ID token by default, but that only
+authorizes anything once Cloud Run knows to trust it):
+
+```bash
+PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/grant_run_invoker.sh
+```
+
+This grants `roles/run.invoker` on the Cloud Run MCP service to the
+default Agent Runtime service agent
+(`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`).
+If you deployed with a custom `service_account`, or with Agent Identity
+(step 4), pass `AGENT_SERVICE_ACCOUNT=...` instead - see the script's
+header comment.
 
 ## 4. Route the agent's tool calls through Agent Gateway
 
@@ -270,23 +286,18 @@ Application Default Credentials, as a bearer header on any `https://`
 `MCP_SERVER_URL`, and skips it for `localhost`/`127.0.0.1`. To make that
 token actually mean something, lock the Cloud Run service down:
 
-1. Redeploy `mcp_server/` **without** `--allow-unauthenticated`, or run:
+1. Grant the agent's runtime identity `roles/run.invoker` on the Cloud Run
+   service (see step 3 above):
+   ```bash
+   PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/grant_run_invoker.sh
+   ```
+2. Stop accepting unauthenticated calls - redeploy `mcp_server/` **without**
+   `--allow-unauthenticated`, or remove the existing public binding:
    ```bash
    gcloud run services remove-iam-policy-binding <SERVICE_NAME> \
-     --region=<REGION> --member=allUsers --role=roles/run.invoker
+     --project=<PROJECT_ID> --region=<REGION> \
+     --member=allUsers --role=roles/run.invoker
    ```
-2. Grant the agent's runtime identity `roles/run.invoker` on the Cloud Run
-   service:
-   ```bash
-   gcloud run services add-iam-policy-binding <SERVICE_NAME> \
-     --region=<REGION> \
-     --member="serviceAccount:<AGENT_RUNTIME_SERVICE_ACCOUNT>" \
-     --role=roles/run.invoker
-   ```
-   The default runtime identity is
-   `service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`
-   unless you set a custom `service_account` or `identity_type=AGENT_IDENTITY`
-   (see step 4) when deploying.
 
 If you've set up **Agent Gateway** (step 4 above) instead, it becomes the
 enforcement point: authorization is centrally checked via
