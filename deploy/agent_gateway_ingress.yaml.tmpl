@@ -13,6 +13,19 @@
 #     < deploy/agent_gateway_ingress.yaml.tmpl > deploy/agent_gateway_ingress.yaml
 #
 # Reference: https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/set-up-agent-gateway
+#
+# On `protocols: [MCP]` below: this traffic (a client calling
+# reasoningEngines.query) is obviously not MCP wire protocol. It's set to
+# MCP anyway because, per someone who reverse-engineered the actual JSON
+# schema (the import validator echoes its full schema back on a rejected
+# document), `protocols` currently accepts only two enum values for the
+# whole Agent Gateway resource type - MCP and PROTOCOL_UNSPECIFIED - with
+# no distinct value yet for agent-query/A2A-style traffic:
+# https://dev.to/iamrobertmoore/five-things-i-found-in-googles-agent-registry-and-agent-gateway-that-arent-in-the-docs-236f
+# This is a real rough edge on a brand-new (2026) surface, not a
+# deliberate choice on our part. To get 100% ground truth yourself, submit
+# an intentionally-invalid value (e.g. `protocols: [BOGUS]`) with
+# setup_ingress_gateway.sh - the rejected import prints the live schema.
 
 name: ${AGW_NAME}
 protocols:

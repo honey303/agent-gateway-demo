@@ -218,6 +218,17 @@ client ────┤  checked at                 │      checked: roles/iap.e
 > networking/IAM setup than a demo strictly needs; skip this section if you
 > just want the agent talking to its MCP server directly (steps 1-3 above
 > are already a complete, working deployment).
+>
+> One specific rough edge: both YAML templates set `protocols: [MCP]`, even
+> the ingress one, where the traffic (a client calling
+> `reasoningEngines.query`) obviously isn't MCP wire protocol. Per someone
+> who reverse-engineered the actual schema, `MCP` and `PROTOCOL_UNSPECIFIED`
+> are currently the *only* two values that field accepts for the whole
+> Agent Gateway resource type - there's no distinct value yet for
+> agent-query/A2A-style traffic. Once you have real `gcloud` access, you
+> can confirm this yourself for certain: submit an intentionally-invalid
+> `protocols` value and the rejected import prints the live JSON schema
+> back at you - the single most reliable way to check anything here.
 
 ### Prerequisites
 
