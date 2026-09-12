@@ -16,7 +16,7 @@ set -euo pipefail
 
 PROJECT_ID="${PROJECT_ID:?Set PROJECT_ID to your GCP project id}"
 REGION="${REGION:-us-central1}"
-MCP_URL="${MCP_URL:?Set MCP_URL to the deployed MCP server's /mcp endpoint}"
+MCP_URL="${MCP_URL:?Set MCP_URL to the deployed MCP server /mcp endpoint}"
 SERVICE_NAME="${SERVICE_NAME:-mcp-demo-server}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

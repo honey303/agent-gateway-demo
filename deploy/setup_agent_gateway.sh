@@ -4,7 +4,7 @@
 # permission to route traffic through it to the registered MCP server.
 #
 # Run this AFTER register_mcp_server.sh and after you know the agent's
-# Agent Identity principal (printed by deploy_agent_engine.py).
+# Agent Identity principal (printed by enable_agent_gateway.py).
 #
 # Usage:
 #   PROJECT_ID=my-project REGION=us-central1 AGENT_PRINCIPAL='principal://...' \
@@ -22,7 +22,7 @@ PROJECT_ID="${PROJECT_ID:?Set PROJECT_ID to your GCP project id}"
 REGION="${REGION:-us-central1}"
 AGW_NAME="${AGW_NAME:-mcp-agent-gateway}"
 SERVICE_NAME="${SERVICE_NAME:-mcp-demo-server}"
-AGENT_PRINCIPAL="${AGENT_PRINCIPAL:?Set AGENT_PRINCIPAL to the agent's Agent Identity principal (see deploy_agent_engine.py output)}"
+AGENT_PRINCIPAL="${AGENT_PRINCIPAL:?Set AGENT_PRINCIPAL to the agent Agent Identity principal (see enable_agent_gateway.py output)}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -49,5 +49,5 @@ gcloud iap web add-iam-policy-binding \
   --role=roles/iap.egressor
 
 echo
-echo "Agent Gateway resource name (pass this to deploy_agent_engine.py as AGENT_GATEWAY_RESOURCE_NAME):"
+echo "Egress Agent Gateway resource name (pass this to enable_agent_gateway.py as EGRESS_AGENT_GATEWAY_RESOURCE_NAME):"
 echo "  projects/${PROJECT_ID}/locations/${REGION}/agentGateways/${AGW_NAME}"

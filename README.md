@@ -3,8 +3,9 @@
 A minimal example of a Google **ADK** agent that calls tools on a remote
 **MCP** server, deployed to **Agent Runtime** (Google Cloud's managed agent
 runtime, part of the Gemini Enterprise Agent Platform - formerly Vertex AI
-Agent Builder), with its outbound MCP tool calls governed by **Agent
-Gateway**.
+Agent Builder), with *both* directions of its traffic governed by **Agent
+Gateway**: outbound MCP tool calls (egress) and inbound client calls to the
+agent itself (ingress).
 
 > **A note on naming:** "Agent Runtime" is the current product name for what
 > the `reasoningEngines` API and the `adk` CLI still call **Agent Engine** -
@@ -12,17 +13,15 @@ Gateway**.
 > product and "Agent Engine" when referring to the literal API/CLI surface.
 
 ```
- mcp_agent/                                              mcp_server/
- ADK agent                                                MCP server
- (Gemini + McpToolset)  ──▶  Agent Gateway  ──▶            (roll_dice, etc.)
-                             (Agent-to-Anywhere,
-                              checks IAM against
-                              Agent Registry)
-        │ adk deploy agent_engine                                 │ gcloud run deploy
-        ▼                                                         ▼
-   Agent Runtime                                               Cloud Run
- (Agent Identity on)                                    (registered in
-                                                           Agent Registry)
+              Agent Gateway                                  Agent Gateway
+client ──▶ (Client-to-Agent,   ──▶  mcp_agent/         ──▶  (Agent-to-Anywhere,   ──▶ mcp_server/
+  call     ingress)                 ADK agent                checks IAM against         MCP server
+                                     (Gemini + McpToolset)     Agent Registry)          (roll_dice, etc.)
+                                          │ adk deploy agent_engine                            │ gcloud run deploy
+                                          ▼                                                    ▼
+                                     Agent Runtime                                          Cloud Run
+                                   (Agent Identity on)                                (registered in
+                                                                                        Agent Registry)
 ```
 
 - **`mcp_server/`** – a tiny MCP server (built with the official `mcp` Python
@@ -31,8 +30,9 @@ Gateway**.
 - **`mcp_agent/`** – an ADK agent whose only tool is an `McpToolset` pointed
   at the MCP server's URL. It's deployed to **Agent Runtime**.
 - **`deploy/`** – scripts to deploy both, register the MCP server with
-  **Agent Registry**, and route the agent's tool calls through **Agent
-  Gateway** instead of calling Cloud Run directly.
+  **Agent Registry**, and route both directions of agent traffic through
+  **Agent Gateway** (egress to the MCP server, ingress from clients to the
+  agent) instead of calling/being called directly.
 
 Everything here is a self-contained demo (no external API keys required) —
 swap the MCP server's tools and the agent's model/instructions for your own.
@@ -178,25 +178,35 @@ If you deployed with a custom `service_account`, or with Agent Identity
 (step 4), pass `AGENT_SERVICE_ACCOUNT=...` instead - see the script's
 header comment.
 
-## 4. Route the agent's tool calls through Agent Gateway
+## 4. Route both ingress and egress through Agent Gateway
 
-By default, the deployed agent calls `MCP_SERVER_URL` directly - the same as
-running locally. **Agent Gateway** puts a governed, zero-trust proxy in
-front of that call instead: the agent's outbound (egress) traffic goes
-through the gateway, which checks IAM authorization (`roles/iap.egressor`)
-against **Agent Registry** before letting a call through to the MCP server.
-This is Google Cloud's recommended pattern for agent-to-tool traffic on
-Agent Runtime as of the 2026 Gemini Enterprise Agent Platform rebrand.
+By default the agent calls `MCP_SERVER_URL` directly (egress), and clients
+call the agent's `reasoningEngines.query` endpoint directly (ingress) - the
+same as running locally. **Agent Gateway** puts a governed, zero-trust
+proxy in front of *both* instead - this is Google Cloud's recommended
+pattern for agent traffic on Agent Runtime as of the 2026 Gemini Enterprise
+Agent Platform rebrand:
+
+- **Egress** (Agent-to-Anywhere): the agent's outbound tool calls are
+  checked against `roles/iap.egressor` on the target, as registered in
+  **Agent Registry**, before being let through to the MCP server.
+- **Ingress** (Client-to-Agent): incoming client calls to the agent are
+  intercepted and can be inspected/policed (e.g. with Model Armor for
+  prompt-injection defense) before they reach Agent Runtime. This one
+  requires the gateway to be in the *same project and region* as the agent
+  (egress gateways may live in a different project, same region only), and
+  doesn't use Agent Registry at all.
 
 ```
-mcp_agent (Agent Runtime, Agent Identity)
-   │  outbound call to the MCP server, transparently intercepted
-   ▼
-Agent Gateway  (Agent-to-Anywhere / egress mode)
-   │  checks: does this agent's identity have roles/iap.egressor
-   │  on the target service registered in Agent Registry?
-   ▼
-mcp_server  (Cloud Run, registered in Agent Registry)
+        Agent Gateway                          Agent Gateway
+     (Client-to-Agent /             mcp_agent  (Agent-to-Anywhere /
+        ingress)                  (Agent Runtime,      egress)
+           │                       Agent Identity)         │
+client ────┤  checked at                 │      checked: roles/iap.egressor
+  call     │  the network edge          │      on the target in Agent
+           ▼                            ▼      Registry?
+      reasoningEngines.query    outbound call intercepted ──▶ mcp_server
+      (no code change needed)                                (Cloud Run)
 ```
 
 > **Heads-up:** Agent Gateway, Agent Registry, and Agent Identity are newly
@@ -215,7 +225,7 @@ mcp_server  (Cloud Run, registered in Agent Registry)
 - Your agent is already deployed (step 3 above) and you have its resource
   name, e.g. `projects/123456789/locations/us-central1/reasoningEngines/987654321`.
 - Your Google Cloud organization ID (`gcloud organizations list`) - needed
-  to construct the agent's Agent Identity principal.
+  to construct the agent's Agent Identity principal (egress only).
 - `pip install -r deploy/requirements.txt`
 
 ### Steps
@@ -231,10 +241,11 @@ mcp_server  (Cloud Run, registered in Agent Registry)
    ```
 
    Note the printed `principal://agents.global.org-.../reasoningEngines/...`
-   value - you'll need it in step 3.
+   value - you'll need it in step 3 (egress only; ingress needs no extra
+   IAM binding by default).
 
-2. **Register the MCP server with Agent Registry**, so Agent Gateway knows
-   about it:
+2. **Register the MCP server with Agent Registry** (egress only), so Agent
+   Gateway knows about it:
 
    ```bash
    PROJECT_ID=<your-project-id> REGION=us-central1 \
@@ -242,8 +253,8 @@ mcp_server  (Cloud Run, registered in Agent Registry)
      ./deploy/register_mcp_server.sh
    ```
 
-3. **Create the Agent Gateway and authorize the agent to use it**, using the
-   principal from step 1:
+3. **Create the egress gateway and authorize the agent to use it**, using
+   the principal from step 1:
 
    ```bash
    PROJECT_ID=<your-project-id> REGION=us-central1 \
@@ -251,22 +262,47 @@ mcp_server  (Cloud Run, registered in Agent Registry)
      ./deploy/setup_agent_gateway.sh
    ```
 
-   This prints the new gateway's resource name, e.g.
+   Prints the egress gateway's resource name, e.g.
    `projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway`.
 
-4. **Point the agent's egress at the gateway**:
+4. **Create the ingress gateway** (must be same project + region as the
+   agent):
+
+   ```bash
+   PROJECT_ID=<your-project-id> REGION=us-central1 \
+     ./deploy/setup_ingress_gateway.sh
+   ```
+
+   Prints the ingress gateway's resource name, e.g.
+   `projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway-ingress`.
+
+5. **Point the agent at both gateways** in one call:
 
    ```bash
    PROJECT_ID=<your-project-id> LOCATION=us-central1 \
    RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/<ID> \
-   AGENT_GATEWAY_RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway \
+   EGRESS_AGENT_GATEWAY_RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway \
+   INGRESS_AGENT_GATEWAY_RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway-ingress \
      python deploy/enable_agent_gateway.py
    ```
 
-From here, the agent's calls to `MCP_SERVER_URL` are intercepted and
-authorized by Agent Gateway rather than going straight to Cloud Run. You can
-now also lock the Cloud Run service back down (remove
-`--allow-unauthenticated`) - see **Securing the MCP server** below.
+   (Set just one of the two env vars if you only want one direction routed
+   through Agent Gateway for now - re-run later with the other once it's
+   ready; each call only changes what you pass.)
+
+From here: the agent's calls to `MCP_SERVER_URL` are intercepted and
+authorized by the egress gateway rather than going straight to Cloud Run,
+and client calls to the agent (step 5 in "Query the deployed agent" below -
+no code change needed there) are intercepted by the ingress gateway before
+reaching Agent Runtime. You can now also lock the Cloud Run service back
+down (remove `--allow-unauthenticated`) - see **Securing the MCP server**
+below.
+
+Want Model Armor (prompt-injection / harmful-content inspection) on the
+ingress path too? That's a further step on top of this - see
+[Configure Model Armor on a gateway](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/configure-model-armor)
+and the ["Agent Gateway ingress to Agent Runtime with Model Armor" codelab](https://codelabs.developers.google.com/agw-cuj-arun-ingress-modar) -
+not covered by the scripts here.
 
 ## 5. Query the deployed agent
 
@@ -330,6 +366,8 @@ gcloud run services delete mcp-demo-server --region=us-central1
 
 # If you set up Agent Gateway (step 4):
 gcloud network-services agent-gateways delete mcp-agent-gateway \
+  --project=<PROJECT_ID> --location=us-central1
+gcloud network-services agent-gateways delete mcp-agent-gateway-ingress \
   --project=<PROJECT_ID> --location=us-central1
 gcloud alpha agent-registry services delete mcp-demo-server \
   --project=<PROJECT_ID> --location=us-central1
