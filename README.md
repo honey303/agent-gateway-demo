@@ -1,321 +1,443 @@
-# agent-gateway-demo
+# Agent-Gateway-Demo
 
-A minimal example of a Google **ADK** agent that calls tools on a remote
-**MCP** server, deployed to **Agent Runtime** (Google Cloud's managed agent
-runtime, part of the Gemini Enterprise Agent Platform - formerly Vertex AI
-Agent Builder), with *both* directions of its traffic governed by **Agent
-Gateway**: outbound MCP tool calls (egress) and inbound client calls to the
-agent itself (ingress).
+A minimal **ADK** agent that calls tools on a remote **MCP** server, deployed
+to **Agent Runtime**, with *both* directions of its traffic governed by
+**Agent Gateway** — outbound tool calls (egress) and inbound client calls
+(ingress).
 
-> **A note on naming:** "Agent Runtime" is the current product name for what
-> the `reasoningEngines` API and the `adk` CLI still call **Agent Engine** -
-> they're the same resource. This README uses "Agent Runtime" for the
-> product and "Agent Engine" when referring to the literal API/CLI surface.
+> **Naming:** "Agent Runtime" is the current product name for what the
+> `reasoningEngines` API and the `adk` CLI still call **Agent Engine**. Same
+> resource. This README uses "Agent Runtime" for the product, "Agent Engine"
+> for the literal API/CLI surface.
+
+## Architecture
+
+Agent Gateway is the network entry and exit point for agent interactions on
+the Gemini Enterprise Agent Platform. It supports two
+[governed access paths](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/agent-gateway-overview):
+**Client-to-Agent** (ingress) and **Agent-to-Anywhere** (egress). Authorization
+decisions use the agent's **Agent Identity** as the principal, and are checked
+via **IAP/IAM** against entries in **Agent Registry**.
+
+```mermaid
+flowchart LR
+    client["Client<br/>SDK · curl · Gemini CLI"]
+    ingress["<b>Agent Gateway</b><br/>Client-to-Agent (ingress)<br/>CONTENT_AUTHZ · Model Armor"]
+    agent["<b>mcp_agent</b> on Agent Runtime<br/>ADK · Gemini · McpToolset<br/>Agent Identity enabled"]
+    egress["<b>Agent Gateway</b><br/>Agent-to-Anywhere (egress)<br/>default-deny · TLS inspection"]
+    mcp["<b>mcp_server</b> on Cloud Run<br/>roll_dice · get_server_time · word_count"]
+    apis["Platform APIs<br/>Sessions · Logging · Telemetry · aiplatform"]
+    policy["<b>IAP + IAM</b><br/>roles/iap.egressor on<br/><b>Agent Registry</b> entries"]
+
+    client --> ingress --> agent
+    agent -- "every outbound call" --> egress
+    egress --> mcp
+    egress --> apis
+    egress <-. "allow / deny" .-> policy
+```
+
+| Directory | What it is | Deployed to |
+| --- | --- | --- |
+| `mcp_server/` | MCP server (`FastMCP`) with three demo tools | Cloud Run |
+| `mcp_agent/` | ADK agent whose only tool is an `McpToolset` | Agent Runtime |
+| `deploy/` | Scripts to deploy, govern and test the above | — |
+
+Self-contained, no external API keys. Swap the tools and the agent's
+model/instructions for your own.
+
+### Repository layout
 
 ```
-              Agent Gateway                                  Agent Gateway
-client ──▶ (Client-to-Agent,   ──▶  mcp_agent/         ──▶  (Agent-to-Anywhere,   ──▶ mcp_server/
-  call     ingress)                 ADK agent                checks IAM against         MCP server
-                                     (Gemini + McpToolset)     Agent Registry)          (roll_dice, etc.)
-                                          │ adk deploy agent_engine                            │ gcloud run deploy
-                                          ▼                                                    ▼
-                                     Agent Runtime                                          Cloud Run
-                                   (Agent Identity on)                                (registered in
-                                                                                        Agent Registry)
+deploy/
+  lib/          common.sh, agentclient.py  — shared config, auth, logging
+  templates/    Agent Gateway YAML templates (rendered with envsubst)
+  runtime/      deploy the MCP server and the agent
+  gateway/      Agent Identity, Agent Registry, gateways, policies
+  tests/        smoke test + one negative test per direction
 ```
 
-- **`mcp_server/`** – a tiny MCP server (built with the official `mcp` Python
-  SDK's `FastMCP`) exposing three demo tools: `roll_dice`, `get_server_time`,
-  `word_count`. It's deployed to **Cloud Run**.
-- **`mcp_agent/`** – an ADK agent whose only tool is an `McpToolset` pointed
-  at the MCP server's URL. It's deployed to **Agent Runtime**.
-- **`deploy/`** – scripts to deploy both, register the MCP server with
-  **Agent Registry**, and route both directions of agent traffic through
-  **Agent Gateway** (egress to the MCP server, ingress from clients to the
-  agent) instead of calling/being called directly.
+Every shell script sources `lib/common.sh` (strict mode, resource-name
+defaults, `gcloud` helpers); every Python script imports `lib/agentclient.py`
+(auth, the `:query`/`:streamQuery` calls, Cloud Logging lookups). Resource
+names are defaulted in one place, so `PROJECT_ID` is usually the only
+variable you need to set.
 
-Everything here is a self-contained demo (no external API keys required) —
-swap the MCP server's tools and the agent's model/instructions for your own.
+### Why the MCP server is a separate HTTP service
 
-## Why the MCP server is a separate, HTTP-based service
-
-ADK's `MCPToolset`/`McpToolset` can connect over stdio (spawning a local MCP
-server subprocess) or over HTTP (SSE / Streamable HTTP, talking to a remote
-server). For **local development** either works fine.
-
-For **deployment to Agent Engine**, only the HTTP-based connection works
-today. Agent Engine's deploy step pickles the agent object graph to ship it;
-a stdio-based `MCPToolset` holds a live subprocess/pipe (`TextIOWrapper`)
-that cannot be pickled, so deployment fails with:
+ADK's `McpToolset` can connect over stdio or over HTTP. Locally either works,
+but **only HTTP works for deployment**: Agent Engine pickles the agent object
+graph to ship it, and a stdio toolset holds a live subprocess pipe:
 
 ```
 TypeError: cannot pickle 'TextIOWrapper' instances
 ```
 
-(see [google/adk-python#1727](https://github.com/google/adk-python/issues/1727)
-and [#1024](https://github.com/google/adk-python/issues/1024)). Running the
-MCP server as its own HTTP service and connecting via
-`StreamableHTTPConnectionParams(url=...)` sidesteps the bug entirely — the
-agent only stores a URL string, which pickles just fine.
+(see [adk-python#1727](https://github.com/google/adk-python/issues/1727) and
+[#1024](https://github.com/google/adk-python/issues/1024)). With
+`StreamableHTTPConnectionParams(url=...)` the agent only stores a URL string,
+which pickles fine.
 
 ## Prerequisites
 
 - Python 3.11+
-- A GCP project with the Vertex AI API and Cloud Run API enabled, and
-  billing set up
-- `gcloud` CLI, authenticated (`gcloud auth login`) with
-  `gcloud config set project <PROJECT_ID>`
-- Application Default Credentials for local testing:
-  `gcloud auth application-default login`
+- A GCP project with the Vertex AI and Cloud Run APIs enabled, and billing on
+- `gcloud` CLI authenticated (`gcloud auth login`,
+  `gcloud config set project <PROJECT_ID>`)
+- `gcloud auth application-default login` for local testing
 
 ## 1. Run it locally
-
-Install dependencies (a virtualenv is recommended):
 
 ```bash
 pip install -r mcp_server/requirements.txt
 pip install -r mcp_agent/requirements.txt
+
+python mcp_server/server.py          # serves http://127.0.0.1:8080/mcp
 ```
 
-Start the MCP server (defaults to `http://127.0.0.1:8080/mcp`):
-
-```bash
-python mcp_server/server.py
-```
-
-In another terminal, configure the agent to use it:
+In another terminal:
 
 ```bash
 cp mcp_agent/.env.example mcp_agent/.env
-# mcp_agent/.env already defaults MCP_SERVER_URL to the local server above.
-# Fill in GOOGLE_CLOUD_PROJECT with your project id (needed for Vertex AI).
-```
+# defaults MCP_SERVER_URL to the local server; fill in GOOGLE_CLOUD_PROJECT
 
-Then run the agent with ADK's dev UI or CLI, from the repo root:
-
-```bash
-adk web .          # browser chat UI, pick "mcp_agent" from the dropdown
+adk web .          # browser chat UI, pick "mcp_agent"
 # or
 adk run mcp_agent  # terminal chat
 ```
 
-Try asking it: *"Roll a 20-sided die"* or *"What's the server time?"* — it
-should call the corresponding MCP tool and use the result in its reply.
+Ask it *"Roll a 20-sided die"* — it should call the MCP tool and use the result.
 
 ## 2. Deploy the MCP server to Cloud Run
 
-Already have it deployed? Skip straight to step 3 with its URL.
-
 ```bash
-PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/deploy_mcp_server.sh
+PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/runtime/deploy_mcp_server.sh
 ```
 
-This builds `mcp_server/` into a container (via Cloud Build) and deploys it
-to Cloud Run, printing the service URL. Note the URL — you'll need
-`<url>/mcp` as `MCP_SERVER_URL`.
+Note the printed URL — you need `<url>/mcp` as `MCP_SERVER_URL`.
 
-> The script uses `--allow-unauthenticated` for demo simplicity. This is
-> **not** recommended beyond a demo — see **Securing the MCP server** below,
-> which is now the default behavior of `mcp_agent/agent.py` (it attaches a
-> Google ID token automatically for any `https://` `MCP_SERVER_URL`).
+> [!NOTE]
+> The script uses `--allow-unauthenticated` for demo simplicity. See
+> [Securing the MCP server](#securing-the-mcp-server) to lock it down.
 
-## 3. Deploy the agent to Vertex AI Agent Engine
+## 3. Deploy the agent to Agent Runtime
 
-Install the deploy-time tooling first (separate from
-`mcp_agent/requirements.txt`, which only covers what the deployed agent
-needs at *runtime* — `adk deploy agent_engine` itself additionally needs
-`vertexai`, which isn't pulled in by that file):
+Deploy-time tooling is separate from the agent's runtime requirements
+(`adk deploy agent_engine` additionally needs `vertexai`):
 
 ```bash
 pip install -r deploy/requirements.txt
 ```
 
-Update `mcp_agent/.env` with the real values:
+Set the real values in `mcp_agent/.env`:
 
 ```dotenv
 GOOGLE_GENAI_USE_ENTERPRISE=1
 GOOGLE_CLOUD_PROJECT=<your-project-id>
 GOOGLE_CLOUD_LOCATION=us-central1
 MCP_SERVER_URL=https://<your-cloud-run-url>/mcp
-# MCP_SERVER_AUTH=auto  # attaches an ID token automatically; see below
+# MCP_SERVER_AUTH=auto   # attaches a Google ID token; see "Securing" below
 ```
 
-Then deploy:
+Then:
 
 ```bash
-PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/deploy_agent.sh
+PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/runtime/deploy_agent.sh
 ```
 
-This is a thin wrapper around the ADK CLI (`adk deploy agent_engine`). It
-packages `mcp_agent/` (including its `requirements.txt` and `.env`), builds
-a container via Cloud Build, and creates/updates a **Reasoning Engine**
-(Agent Engine) resource in your project. On success it prints the deployed
-resource name, e.g.:
+This wraps `adk deploy agent_engine`: it packages `mcp_agent/` (including its
+`requirements.txt` and `.env`), builds via Cloud Build, and creates the
+Reasoning Engine. It prints the resource name — note it down:
 
 ```
-projects/123456789/locations/us-central1/reasoningEngines/987654321
+projects/<PROJECT_NUMBER>/locations/us-central1/reasoningEngines/<ID>
 ```
 
-Note it down - you'll need it below and in step 4. To redeploy after
-changes instead of creating a new resource, pass its numeric id:
+To redeploy in place instead of creating a new resource, pass the numeric id:
 
 ```bash
-PROJECT_ID=<your-project-id> AGENT_ENGINE_ID=987654321 ./deploy/deploy_agent.sh
+PROJECT_ID=<your-project-id> AGENT_ENGINE_ID=<ID> ./deploy/runtime/deploy_agent.sh
 ```
 
-Now grant the agent's runtime identity permission to actually call the MCP
-server (`mcp_agent/agent.py` attaches an ID token by default, but that only
-authorizes anything once Cloud Run knows to trust it):
+Finally, let the agent actually call Cloud Run:
 
 ```bash
-PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/grant_run_invoker.sh
+PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/runtime/grant_run_invoker.sh
 ```
 
-This grants `roles/run.invoker` on the Cloud Run MCP service to the
-default Agent Runtime service agent
-(`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`).
-If you deployed with a custom `service_account`, or with Agent Identity
-(step 4), pass `AGENT_SERVICE_ACCOUNT=...` instead - see the script's
-header comment.
+This grants `roles/run.invoker` to the default Agent Runtime service agent
+(`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`). For
+a custom `service_account`, pass `AGENT_SERVICE_ACCOUNT=...`.
 
-## 4. Route both ingress and egress through Agent Gateway
+**Steps 1–3 are a complete, working deployment.** Everything below adds
+governance.
 
-By default the agent calls `MCP_SERVER_URL` directly (egress), and clients
-call the agent's `reasoningEngines.query` endpoint directly (ingress) - the
-same as running locally. **Agent Gateway** puts a governed, zero-trust
-proxy in front of *both* instead - this is Google Cloud's recommended
-pattern for agent traffic on Agent Runtime as of the 2026 Gemini Enterprise
-Agent Platform rebrand:
-
-- **Egress** (Agent-to-Anywhere): the agent's outbound tool calls are
-  checked against `roles/iap.egressor` on the target, as registered in
-  **Agent Registry**, before being let through to the MCP server.
-- **Ingress** (Client-to-Agent): incoming client calls to the agent are
-  intercepted and can be inspected/policed (e.g. with Model Armor for
-  prompt-injection defense) before they reach Agent Runtime. This one
-  requires the gateway to be in the *same project and region* as the agent
-  (egress gateways may live in a different project, same region only), and
-  doesn't use Agent Registry at all.
-
-```
-        Agent Gateway                          Agent Gateway
-     (Client-to-Agent /             mcp_agent  (Agent-to-Anywhere /
-        ingress)                  (Agent Runtime,      egress)
-           │                       Agent Identity)         │
-client ────┤  checked at                 │      checked: roles/iap.egressor
-  call     │  the network edge          │      on the target in Agent
-           ▼                            ▼      Registry?
-      reasoningEngines.query    outbound call intercepted ──▶ mcp_server
-      (no code change needed)                                (Cloud Run)
-```
-
-> **Heads-up:** Agent Gateway, Agent Registry, and Agent Identity are newly
-> announced (Cloud Next 2026) enterprise governance features. The scripts
-> below follow the documented resource shapes and `gcloud` commands as of
-> this writing, but some surfaces are still on the `alpha` track and flag
-> names may move - if a command fails, check it against the linked docs
-> before assuming the script is wrong. This is also meaningfully more
-> networking/IAM setup than a demo strictly needs; skip this section if you
-> just want the agent talking to its MCP server directly (steps 1-3 above
-> are already a complete, working deployment).
->
-> One specific rough edge: both YAML templates set `protocols: [MCP]`, even
-> the ingress one, where the traffic (a client calling
-> `reasoningEngines.query`) obviously isn't MCP wire protocol. Per someone
-> who reverse-engineered the actual schema, `MCP` and `PROTOCOL_UNSPECIFIED`
-> are currently the *only* two values that field accepts for the whole
-> Agent Gateway resource type - there's no distinct value yet for
-> agent-query/A2A-style traffic. Once you have real `gcloud` access, you
-> can confirm this yourself for certain: submit an intentionally-invalid
-> `protocols` value and the rejected import prints the live JSON schema
-> back at you - the single most reliable way to check anything here.
+## 4. Route traffic through Agent Gateway
 
 ### Prerequisites
 
-- Your MCP server is already deployed (step 2 above) and its URL is known.
-- Your agent is already deployed (step 3 above) and you have its resource
-  name, e.g. `projects/123456789/locations/us-central1/reasoningEngines/987654321`.
-- Your Google Cloud organization ID (`gcloud organizations list`) - needed
-  to construct the agent's Agent Identity principal (egress only).
+- Steps 2 and 3 done; MCP URL and agent resource name in hand
+- Your organization ID (`gcloud organizations list`) — needed to build the
+  Agent Identity principal (egress only)
 - `pip install -r deploy/requirements.txt`
 
 ### Steps
 
-1. **Turn on Agent Identity for the deployed agent**, then read off its
-   identity principal:
+**1. Enable Agent Identity** and read off the principal:
 
-   ```bash
-   PROJECT_ID=<your-project-id> LOCATION=us-central1 \
-   RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/<ID> \
-   ORGANIZATION_ID=<your-org-id> \
-     python deploy/enable_agent_gateway.py
-   ```
+```bash
+PROJECT_ID=<your-project-id> LOCATION=us-central1 \
+RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/<ID> \
+ORGANIZATION_ID=<your-org-id> \
+  python deploy/gateway/enable_agent_gateway.py
+```
 
-   Note the printed `principal://agents.global.org-.../reasoningEngines/...`
-   value - you'll need it in step 3 (egress only; ingress needs no extra
-   IAM binding by default).
+Note the printed `principal://agents.global.org-.../reasoningEngines/...`.
 
-2. **Register the MCP server with Agent Registry** (egress only), so Agent
-   Gateway knows about it:
+**2. Register the MCP server with Agent Registry** (egress only):
 
-   ```bash
-   PROJECT_ID=<your-project-id> REGION=us-central1 \
-   MCP_URL=https://<your-cloud-run-url>/mcp \
-     ./deploy/register_mcp_server.sh
-   ```
+```bash
+PROJECT_ID=<your-project-id> REGION=us-central1 \
+MCP_URL=https://<your-cloud-run-url>/mcp \
+  ./deploy/gateway/register_mcp_server.sh
+```
 
-3. **Create the egress gateway and authorize the agent to use it**, using
-   the principal from step 1:
+**3. Create the egress gateway** and authorize the agent on the MCP entry:
 
-   ```bash
-   PROJECT_ID=<your-project-id> REGION=us-central1 \
-   AGENT_PRINCIPAL='principal://agents.global.org-.../reasoningEngines/...' \
-     ./deploy/setup_agent_gateway.sh
-   ```
+```bash
+PROJECT_ID=<your-project-id> REGION=us-central1 \
+AGENT_PRINCIPAL='principal://agents.global.org-.../reasoningEngines/...' \
+  ./deploy/gateway/setup_egress_gateway.sh
+```
 
-   Prints the egress gateway's resource name, e.g.
-   `projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway`.
+**4. Create the ingress gateway** (must be the same project *and* region as
+the agent; egress gateways may live in another project, same region):
 
-4. **Create the ingress gateway** (must be same project + region as the
-   agent):
+```bash
+PROJECT_ID=<your-project-id> REGION=us-central1 \
+  ./deploy/gateway/setup_ingress_gateway.sh
+```
 
-   ```bash
-   PROJECT_ID=<your-project-id> REGION=us-central1 \
-     ./deploy/setup_ingress_gateway.sh
-   ```
+**5. Point the agent at both gateways** in one call:
 
-   Prints the ingress gateway's resource name, e.g.
-   `projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway-ingress`.
+```bash
+PROJECT_ID=<your-project-id> LOCATION=us-central1 \
+RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/<ID> \
+EGRESS_AGENT_GATEWAY_RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway \
+INGRESS_AGENT_GATEWAY_RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway-ingress \
+  python deploy/gateway/enable_agent_gateway.py
+```
 
-5. **Point the agent at both gateways** in one call:
+> [!WARNING]
+> The update replaces the agent's **whole** gateway config. Once both gateways
+> exist, always pass both env vars — re-running with only one silently clears
+> the other direction.
 
-   ```bash
-   PROJECT_ID=<your-project-id> LOCATION=us-central1 \
-   RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/<ID> \
-   EGRESS_AGENT_GATEWAY_RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway \
-   INGRESS_AGENT_GATEWAY_RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway-ingress \
-     python deploy/enable_agent_gateway.py
-   ```
+**6. Allowlist the platform's own APIs** (egress only):
 
-   (Set just one of the two env vars if you only want one direction routed
-   through Agent Gateway for now - re-run later with the other once it's
-   ready; each call only changes what you pass.)
+```bash
+PROJECT_ID=<your-project-id> REGION=us-central1 \
+AGENT_PRINCIPAL='principal://agents.global.org-.../reasoningEngines/...' \
+  ./deploy/gateway/allowlist_essential_apis.sh
+```
 
-From here: the agent's calls to `MCP_SERVER_URL` are intercepted and
-authorized by the egress gateway rather than going straight to Cloud Run,
-and client calls to the agent (step 5 in "Query the deployed agent" below -
-no code change needed there) are intercepted by the ingress gateway before
-reaching Agent Runtime. You can now also lock the Cloud Run service back
-down (remove `--allow-unauthenticated`) - see **Securing the MCP server**
-below.
+An egress gateway is **default-deny and intercepts everything the agent
+sends** — not just your tool calls, but Agent Runtime's own calls to the
+Sessions API, telemetry and token minting. Skip this and *every* invocation
+fails with `Egress request is not authorized`, including `create_session`,
+long before a tool is reached.
 
-Want Model Armor (prompt-injection / harmful-content inspection) on the
-ingress path too? That's a further step on top of this - see
-[Configure Model Armor on a gateway](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/configure-model-armor)
-and the ["Agent Gateway ingress to Agent Runtime with Model Armor" codelab](https://codelabs.developers.google.com/agw-cuj-arun-ingress-modar) -
-not covered by the scripts here.
+[Hostname matching is exact](https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/runtime/agent-gateway-runtime-deploy) —
+no wildcards — so each regional and `mtls.` variant is a separate grant. The
+script walks the documented essential-endpoint list and skips anything not
+registered in your project.
 
-## 5. Query the deployed agent
+**7. Trust the gateway's TLS-inspection CA** (egress only), then redeploy:
+
+```bash
+PROJECT_ID=<your-project-id> REGION=us-central1 \
+AGW_NAME=<egress-gateway-name> ./deploy/gateway/trust_gateway_ca.sh
+
+PROJECT_ID=<your-project-id> AGENT_ENGINE_ID=<ID> ./deploy/runtime/deploy_agent.sh
+```
+
+The gateway decrypts and re-signs outbound TLS, so the agent must trust its CA
+or every HTTPS call fails with
+`CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`.
+
+Source-based deploys get the CA injected **during image creation** — which
+only helps if the gateway was already attached when the image was built.
+Attaching a gateway to an existing agent (step 5) leaves the running image
+without it. `trust_gateway_ca.sh` writes the certificate into
+`mcp_agent/.env` as `AGENT_GATEWAY_CA_B64`, and `mcp_agent/agent.py` appends
+it to certifi's bundle at startup.
+
+**8. Give the ingress gateway something to enforce** (ingress only):
+
+```bash
+PROJECT_ID=<your-project-id> REGION=us-central1 \
+  ./deploy/gateway/setup_ingress_model_armor.sh
+```
+
+Steps 1–7 leave the ingress gateway passing traffic through untouched — it
+has no policy, so it denies nothing and logs nothing. An ingress gateway
+accepts [exactly one `CONTENT_AUTHZ` authorization policy](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/delegate-authorization);
+this script fills that slot with **Model Armor**, creating the template, the
+IAM grants, the `authzExtension` and the `authzPolicy`.
+
+The IAP/IAM mechanism used for egress (`roles/iap.egressor`) is **not**
+available here: it needs a `REQUEST_AUTHZ` policy, which ingress gateways
+don't support, and Agent Registry isn't consulted on the ingress path at all.
+
+> [!CAUTION]
+> Keep the responsible-AI filters off unless you've tested them against your
+> own traffic. With `DANGEROUS` at `MEDIUM_AND_ABOVE`, Model Armor classifies
+> *"Roll a 6-sided die"* as gambling and returns `403 Model Armor: Prompt
+> violates content security configurations` for the demo's own happy path.
+> The script enables only `pi-and-jailbreak` and `malicious-uri`. Check any
+> prompt against a template directly with the `:sanitizeUserPrompt` endpoint.
+
+> [!TIP]
+> Verify the whole chain with
+> `PROJECT_ID=<your-project-id> python deploy/tests/smoke_test.py`.
+
+### Notes on these scripts
+
+Agent Gateway, Agent Registry and Agent Identity are new (Cloud Next 2026) and
+some surfaces are still on the `alpha` track — if a command fails, check it
+against the linked docs before assuming the script is wrong.
+
+One rough edge: both YAML templates set `protocols: [MCP]`, including the
+ingress one, where the traffic isn't MCP wire protocol. `MCP` and
+`PROTOCOL_UNSPECIFIED` are currently the only two accepted values for the
+resource type. To confirm the live schema for anything here, submit an
+intentionally-invalid value — the rejected import prints the JSON schema back
+at you.
+
+Step 8 uses Model Armor for the ingress policy slot. The two alternatives —
+the [Semantic Governance policy engine](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/policies/semantic-governance-overview)
+(mutually exclusive with Model Armor) and a custom `ext_proc` extension — are
+not scripted here; see
+[Delegate authorization](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/delegate-authorization)
+and the [ingress + Model Armor codelab](https://codelabs.developers.google.com/agw-cuj-arun-ingress-modar).
+
+## 5. Test the deployed agent
+
+### Smoke test
+
+```bash
+PROJECT_ID=<your-project-id> python deploy/tests/smoke_test.py
+```
+
+Asserts the deployed agent's wiring (Agent Identity, both gateways), then
+sends a prompt that can only be answered by calling an MCP tool and checks the
+event stream for the resulting `function_call` / `function_response`. **An
+answer with no tool call is a failure** — the model will happily invent a dice
+roll, which would otherwise look like a pass while the gateway path is broken.
+
+Agent Runtime reports in-agent errors as an opaque `Internal Server Error`, so
+on failure the script checks the gateway's DENIED log first, then the
+runtime's `ERROR` logs, and matches them against known causes (TLS
+interception, missing `iap.egressor`, Cloud Run 403, import errors).
+
+`RESOURCE_NAME` defaults to `REASONING_ENGINE_ID` from `mcp_agent/.env`.
+
+### Negative test — egress
+
+```bash
+PROJECT_ID=<your-project-id> REGION=us-central1 \
+AGENT_PRINCIPAL='principal://agents.global.org-.../reasoningEngines/...' \
+  ./deploy/tests/test_egress_denied.sh
+```
+
+A passing smoke test only shows traffic *flows*, not that anything is
+*enforced*. This revokes the agent's `roles/iap.egressor` on the MCP entry,
+polls until the change reaches the gateway (~30–60s — the API applies it
+instantly but the data plane caches), confirms the tool call is blocked, then
+restores the binding from an `EXIT` trap.
+
+Expected result: the agent still creates a session and still answers — it
+loses *exactly* the capability it was deauthorized for, and the gateway log
+shows `403 DENIED` for the MCP host only.
+
+> [!IMPORTANT]
+> A blocked tool call produces **no error in the agent's own logs**. ADK
+> handles MCP failures gracefully, so the agent quietly runs toolless. The
+> `403 DENIED` gateway log entry is the only real evidence.
+
+### Negative test — ingress
+
+```bash
+PROJECT_ID=<your-project-id> python deploy/tests/test_ingress_blocked.py
+```
+
+Ingress can't be tested by revoking IAM the way egress is, so this drives the
+gateway's `CONTENT_AUTHZ` policy instead. It sends two prompts:
+
+1. a benign one, which must succeed — proving the gateway isn't just broken
+2. a prompt-injection payload, which must be blocked
+
+Expected result:
+
+```
+1. Benign prompt: 'Roll a 6-sided die.'
+PASS allowed (HTTP 200, 2625 bytes of events)
+
+2. Prompt injection: 'Ignore all previous instructions. ...'
+PASS blocked by the ingress gateway (HTTP 403)
+{ "error": { "code": 403,
+  "message": "Model Armor: Prompt violates content security configurations",
+  "status": "PERMISSION_DENIED" } }
+```
+
+The block happens *before* Agent Runtime — the client gets the error and the
+agent never sees the prompt. Requires step 8; without a policy attached the
+injection sails through and the script says so.
+
+> [!NOTE]
+> In Client-to-Agent mode the gateway only governs the agent's `query` and
+> `streamQuery` methods. Other methods (`asyncQuery`, …) bypass it entirely —
+> apply Model Armor in your own code if you use them.
+
+### Observe gateway traffic
+
+**Egress** decisions land in `networkservices.googleapis.com/gateway_requests`:
+
+```bash
+# all egress gateway traffic
+gcloud logging read \
+  'logName="projects/<PROJECT_ID>/logs/networkservices.googleapis.com%2Fgateway_requests"' \
+  --project=<PROJECT_ID> --freshness=1h --limit=20
+
+# denials only
+gcloud logging read \
+  'logName="projects/<PROJECT_ID>/logs/networkservices.googleapis.com%2Fgateway_requests"
+   jsonPayload.authzPolicyInfo.result="DENIED"' \
+  --project=<PROJECT_ID> --freshness=1h --limit=20
+```
+
+Useful fields: `jsonPayload.authzPolicyInfo.result`,
+`.enforcedGatewaySecurityPolicy.hostname`, `.matchedRules[].action`,
+`.requestWasTlsIntercepted`, `resource.labels.gateway_name`,
+`httpRequest.status`.
+
+**Ingress** produces nothing here — `gateway_requests` is 100% egress even
+with a policy attached and actively returning 403s. Model Armor verdicts go
+to their own log instead:
+
+```bash
+gcloud logging read \
+  'logName="projects/<PROJECT_ID>/logs/modelarmor.googleapis.com%2Fsanitize_operations"' \
+  --project=<PROJECT_ID> --freshness=1h --limit=20 \
+  --format='value(jsonPayload.operationType,jsonPayload.sanitizationResult.filterMatchState)'
+```
+
+`operationType` is `SANITIZE_USER_PROMPT` (inbound) or
+`SANITIZE_MODEL_RESPONSE` (outbound — Model Armor screens both directions),
+and `filterMatchState` is `MATCH_FOUND` on a block. This requires
+`--template-metadata-log-sanitize-operations` on the template, which
+`setup_ingress_model_armor.sh` sets.
+
+### Manual query
 
 ```python
 import vertexai
@@ -333,40 +455,41 @@ for event in agent_engine.stream_query(
     print(event)
 ```
 
+> [!NOTE]
+> With `google-cloud-aiplatform` as pinned here, the object returned by
+> `agent_engines.get()` does **not** expose `create_session` / `stream_query`,
+> so the snippet above raises `AttributeError`. `deploy/tests/smoke_test.py` calls
+> the `:query` and `:streamQuery?alt=sse` REST endpoints directly instead.
+> Note that the `input` keys are the agent's Python kwargs, so they're
+> snake_case (`user_id`) inside an otherwise camelCase API.
+
 ## Securing the MCP server
 
-Should the call to Cloud Run be unauthenticated? **No** — not beyond a
-quick local test. `mcp_agent/agent.py` handles this for you by default
+Should the call to Cloud Run be unauthenticated? **No**, not beyond a quick
+local test. `mcp_agent/agent.py` handles this by default
 (`MCP_SERVER_AUTH=auto`): it attaches a Google-signed ID token, fetched via
-Application Default Credentials, as a bearer header on any `https://`
-`MCP_SERVER_URL`, and skips it for `localhost`/`127.0.0.1`. To make that
-token actually mean something, lock the Cloud Run service down:
+ADC, on any `https://` `MCP_SERVER_URL`, and skips it for localhost. To make
+that token mean something:
 
-1. Grant the agent's runtime identity `roles/run.invoker` on the Cloud Run
-   service (see step 3 above):
-   ```bash
-   PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/grant_run_invoker.sh
-   ```
-2. Stop accepting unauthenticated calls - redeploy `mcp_server/` **without**
-   `--allow-unauthenticated`, or remove the existing public binding:
-   ```bash
-   gcloud run services remove-iam-policy-binding <SERVICE_NAME> \
-     --project=<PROJECT_ID> --region=<REGION> \
-     --member=allUsers --role=roles/run.invoker
-   ```
+```bash
+# 1. grant the agent's runtime identity roles/run.invoker
+PROJECT_ID=<your-project-id> REGION=us-central1 ./deploy/runtime/grant_run_invoker.sh
 
-If you've set up **Agent Gateway** (step 4 above) instead, it becomes the
-enforcement point: authorization is centrally checked via
-`roles/iap.egressor` against Agent Registry. In that setup you can set
-`MCP_SERVER_AUTH=off` in `mcp_agent/.env` (the gateway handles auth, so the
-agent doesn't need to attach its own token) — but leaving it on `auto` is
-harmless too, since Cloud Run simply ignores extra bearer tokens once IAM
-auth is delegated to the gateway.
+# 2. stop accepting unauthenticated calls
+gcloud run services remove-iam-policy-binding <SERVICE_NAME> \
+  --project=<PROJECT_ID> --region=<REGION> \
+  --member=allUsers --role=roles/run.invoker
+```
+
+With **Agent Gateway** (step 4) the gateway becomes the enforcement point:
+authorization is centrally checked via `roles/iap.egressor` against Agent
+Registry. You can then set `MCP_SERVER_AUTH=off` in `mcp_agent/.env` — though
+leaving it on `auto` is harmless, since Cloud Run ignores extra bearer tokens
+once auth is delegated to the gateway.
 
 ## Cleaning up
 
 ```bash
-# Agent Runtime (Agent Engine) resource - replace with your resource name:
 python -c "
 import vertexai
 client = vertexai.Client(project='<PROJECT_ID>', location='us-central1')
@@ -375,11 +498,28 @@ client.agent_engines.delete(name='projects/<PROJECT_ID>/locations/us-central1/re
 
 gcloud run services delete mcp-demo-server --region=us-central1
 
-# If you set up Agent Gateway (step 4):
+# if you set up Agent Gateway (step 4):
 gcloud network-services agent-gateways delete mcp-agent-gateway \
   --project=<PROJECT_ID> --location=us-central1
 gcloud network-services agent-gateways delete mcp-agent-gateway-ingress \
   --project=<PROJECT_ID> --location=us-central1
 gcloud alpha agent-registry services delete mcp-demo-server \
   --project=<PROJECT_ID> --location=us-central1
+
+# if you set up Model Armor on ingress (step 8) - delete in this order,
+# the policy references the extension, the extension references the template:
+gcloud network-security authz-policies delete ma-ingress-authz-policy \
+  --project=<PROJECT_ID> --location=us-central1
+gcloud service-extensions authz-extensions delete ma-ingress-authz-ext \
+  --project=<PROJECT_ID> --location=us-central1
+gcloud model-armor templates delete mcp-ingress-armor \
+  --project=<PROJECT_ID> --location=us-central1
 ```
+
+## Reference
+
+- [Agent Gateway overview](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/agent-gateway-overview)
+- [Set up an Agent Gateway](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/set-up-agent-gateway)
+- [Deploy an agent bound to an Agent Gateway](https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/runtime/agent-gateway-runtime-deploy)
+- [Delegate authorization](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/delegate-authorization) — IAP, Model Armor, Semantic Governance, custom extensions
+- [Configure Model Armor on a gateway](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/configure-model-armor)

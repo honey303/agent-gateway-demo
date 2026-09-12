@@ -7,7 +7,7 @@ a standard `tools/list` request. This script connects to the MCP server over
 Streamable HTTP and dumps that.
 
 Usage:
-    python deploy/generate_toolspec.py https://<mcp-server>/mcp > deploy/toolspec.json
+    python deploy/gateway/generate_toolspec.py https://<mcp-server>/mcp > toolspec.json
 """
 
 import asyncio

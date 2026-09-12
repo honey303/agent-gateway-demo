@@ -15,52 +15,43 @@
 #      the deployed agent's environment variables.
 #
 # Usage:
-#   PROJECT_ID=my-project REGION=us-central1 ./deploy/deploy_agent.sh
+#   PROJECT_ID=my-project ./deploy/runtime/deploy_agent.sh
 #
 # To redeploy/update an existing agent instead of creating a new one, pass
 # its numeric id:
-#   PROJECT_ID=my-project AGENT_ENGINE_ID=987654321 ./deploy/deploy_agent.sh
+#   PROJECT_ID=my-project AGENT_ENGINE_ID=987654321 \
+#     ./deploy/runtime/deploy_agent.sh
 #
 # Prints the deployed resource name at the end, e.g.:
 #   projects/123456789/locations/us-central1/reasoningEngines/987654321
-# Note it down - grant_run_invoker.sh and enable_agent_gateway.py both need it.
 
-set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
-PROJECT_ID="${PROJECT_ID:?Set PROJECT_ID to your GCP project id}"
-REGION="${REGION:-us-central1}"
 DISPLAY_NAME="${DISPLAY_NAME:-MCP Gateway Demo Agent}"
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${REPO_ROOT}/mcp_agent/.env"
+[[ -f "${ENV_FILE}" ]] || die \
+  "Missing ${ENV_FILE}. Run: cp mcp_agent/.env.example mcp_agent/.env, fill it in, then retry."
 
-if [[ ! -f "${ENV_FILE}" ]]; then
-  echo "Missing ${ENV_FILE}." >&2
-  echo "Run: cp mcp_agent/.env.example mcp_agent/.env, fill it in, then retry." >&2
-  exit 1
-fi
-
-if ! python3 -c "import vertexai" >/dev/null 2>&1; then
-  echo "Missing the 'vertexai' module (needed by 'adk deploy agent_engine'" >&2
-  echo "itself, not just the deployed agent)." >&2
-  echo "Run: pip install -r deploy/requirements.txt, then retry." >&2
-  exit 1
-fi
+python3 -c "import vertexai" >/dev/null 2>&1 || die \
+  "Missing the 'vertexai' module (needed by 'adk deploy agent_engine' itself,
+  not just the deployed agent). Run: pip install -r deploy/requirements.txt"
 
 deploy_args=(
   --project="${PROJECT_ID}"
   --region="${REGION}"
   --display_name="${DISPLAY_NAME}"
 )
-
 if [[ -n "${AGENT_ENGINE_ID:-}" ]]; then
   deploy_args+=(--agent_engine_id="${AGENT_ENGINE_ID}")
+  step "Redeploying agent ${AGENT_ENGINE_ID} in place"
+else
+  step "Creating a new Agent Runtime deployment"
 fi
 
 adk deploy agent_engine "${deploy_args[@]}" "${REPO_ROOT}/mcp_agent"
 
-echo
-echo "Deployed. Copy the 'projects/.../reasoningEngines/...' resource name"
-echo "printed above - you'll need it for:"
-echo "  RESOURCE_NAME=... ./deploy/grant_run_invoker.sh"
-echo "  RESOURCE_NAME=... python deploy/enable_agent_gateway.py   (if using Agent Gateway)"
+step "Deployed"
+info "Copy the 'projects/.../reasoningEngines/...' resource name printed above."
+info "You'll need it for:"
+dim "./deploy/runtime/grant_run_invoker.sh"
+dim "python deploy/gateway/enable_agent_gateway.py   (if using Agent Gateway)"
