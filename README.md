@@ -1,25 +1,38 @@
 # agent-gateway-demo
 
 A minimal example of a Google **ADK** agent that calls tools on a remote
-**MCP** server, deployed to **Vertex AI Agent Engine** (Google Cloud's
-managed agent runtime).
+**MCP** server, deployed to **Agent Runtime** (Google Cloud's managed agent
+runtime, part of the Gemini Enterprise Agent Platform - formerly Vertex AI
+Agent Builder), with its outbound MCP tool calls governed by **Agent
+Gateway**.
+
+> **A note on naming:** "Agent Runtime" is the current product name for what
+> the `reasoningEngines` API and the `adk` CLI still call **Agent Engine** -
+> they're the same resource. This README uses "Agent Runtime" for the
+> product and "Agent Engine" when referring to the literal API/CLI surface.
 
 ```
-┌─────────────────────┐   Streamable HTTP    ┌──────────────────────┐
-│  mcp_agent/          │  ───────────────────▶│  mcp_server/          │
-│  ADK agent           │                       │  MCP server           │
-│  (Gemini + McpToolset)│◀───────────────────  │  (roll_dice, etc.)     │
-└──────────┬───────────┘                       └───────────┬──────────┘
-           │ adk deploy agent_engine                        │ gcloud run deploy
-           ▼                                                ▼
-  Vertex AI Agent Engine                                 Cloud Run
+ mcp_agent/                                              mcp_server/
+ ADK agent                                                MCP server
+ (Gemini + McpToolset)  ──▶  Agent Gateway  ──▶            (roll_dice, etc.)
+                             (Agent-to-Anywhere,
+                              checks IAM against
+                              Agent Registry)
+        │ adk deploy agent_engine                                 │ gcloud run deploy
+        ▼                                                         ▼
+   Agent Runtime                                               Cloud Run
+ (Agent Identity on)                                    (registered in
+                                                           Agent Registry)
 ```
 
 - **`mcp_server/`** – a tiny MCP server (built with the official `mcp` Python
   SDK's `FastMCP`) exposing three demo tools: `roll_dice`, `get_server_time`,
   `word_count`. It's deployed to **Cloud Run**.
 - **`mcp_agent/`** – an ADK agent whose only tool is an `McpToolset` pointed
-  at the MCP server's URL. It's deployed to **Vertex AI Agent Engine**.
+  at the MCP server's URL. It's deployed to **Agent Runtime**.
+- **`deploy/`** – scripts to deploy both, register the MCP server with
+  **Agent Registry**, and route the agent's tool calls through **Agent
+  Gateway** instead of calling Cloud Run directly.
 
 Everything here is a self-contained demo (no external API keys required) —
 swap the MCP server's tools and the agent's model/instructions for your own.
@@ -136,13 +149,104 @@ projects/123456789/locations/us-central1/reasoningEngines/987654321
 To redeploy after changes, add `--agent_engine_id=<the numeric id>` so it
 updates the existing resource instead of creating a new one.
 
-## 4. Query the deployed agent
+## 4. Route the agent's tool calls through Agent Gateway
+
+By default, the deployed agent calls `MCP_SERVER_URL` directly - the same as
+running locally. **Agent Gateway** puts a governed, zero-trust proxy in
+front of that call instead: the agent's outbound (egress) traffic goes
+through the gateway, which checks IAM authorization (`roles/iap.egressor`)
+against **Agent Registry** before letting a call through to the MCP server.
+This is Google Cloud's recommended pattern for agent-to-tool traffic on
+Agent Runtime as of the 2026 Gemini Enterprise Agent Platform rebrand.
+
+```
+mcp_agent (Agent Runtime, Agent Identity)
+   │  outbound call to the MCP server, transparently intercepted
+   ▼
+Agent Gateway  (Agent-to-Anywhere / egress mode)
+   │  checks: does this agent's identity have roles/iap.egressor
+   │  on the target service registered in Agent Registry?
+   ▼
+mcp_server  (Cloud Run, registered in Agent Registry)
+```
+
+> **Heads-up:** Agent Gateway, Agent Registry, and Agent Identity are newly
+> announced (Cloud Next 2026) enterprise governance features. The scripts
+> below follow the documented resource shapes and `gcloud` commands as of
+> this writing, but some surfaces are still on the `alpha` track and flag
+> names may move - if a command fails, check it against the linked docs
+> before assuming the script is wrong. This is also meaningfully more
+> networking/IAM setup than a demo strictly needs; skip this section if you
+> just want the agent talking to its MCP server directly (steps 1-3 above
+> are already a complete, working deployment).
+
+### Prerequisites
+
+- Your MCP server is already deployed (step 2 above) and its URL is known.
+- Your agent is already deployed (step 3 above) and you have its resource
+  name, e.g. `projects/123456789/locations/us-central1/reasoningEngines/987654321`.
+- Your Google Cloud organization ID (`gcloud organizations list`) - needed
+  to construct the agent's Agent Identity principal.
+- `pip install -r deploy/requirements.txt`
+
+### Steps
+
+1. **Turn on Agent Identity for the deployed agent**, then read off its
+   identity principal:
+
+   ```bash
+   PROJECT_ID=<your-project-id> LOCATION=us-central1 \
+   RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/<ID> \
+   ORGANIZATION_ID=<your-org-id> \
+     python deploy/enable_agent_gateway.py
+   ```
+
+   Note the printed `principal://agents.global.org-.../reasoningEngines/...`
+   value - you'll need it in step 3.
+
+2. **Register the MCP server with Agent Registry**, so Agent Gateway knows
+   about it:
+
+   ```bash
+   PROJECT_ID=<your-project-id> REGION=us-central1 \
+   MCP_URL=https://<your-cloud-run-url>/mcp \
+     ./deploy/register_mcp_server.sh
+   ```
+
+3. **Create the Agent Gateway and authorize the agent to use it**, using the
+   principal from step 1:
+
+   ```bash
+   PROJECT_ID=<your-project-id> REGION=us-central1 \
+   AGENT_PRINCIPAL='principal://agents.global.org-.../reasoningEngines/...' \
+     ./deploy/setup_agent_gateway.sh
+   ```
+
+   This prints the new gateway's resource name, e.g.
+   `projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway`.
+
+4. **Point the agent's egress at the gateway**:
+
+   ```bash
+   PROJECT_ID=<your-project-id> LOCATION=us-central1 \
+   RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/<ID> \
+   AGENT_GATEWAY_RESOURCE_NAME=projects/<PROJECT_ID>/locations/us-central1/agentGateways/mcp-agent-gateway \
+     python deploy/enable_agent_gateway.py
+   ```
+
+From here, the agent's calls to `MCP_SERVER_URL` are intercepted and
+authorized by Agent Gateway rather than going straight to Cloud Run. You can
+now also lock the Cloud Run service back down (remove
+`--allow-unauthenticated`) - see **Securing the MCP server** below.
+
+## 5. Query the deployed agent
 
 ```python
-from vertexai import agent_engines
+import vertexai
 
-agent_engine = agent_engines.get(
-    "projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/<ID>"
+client = vertexai.Client(project="<PROJECT_ID>", location="us-central1")
+agent_engine = client.agent_engines.get(
+    name="projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/<ID>"
 )
 session = agent_engine.create_session(user_id="demo-user")
 for event in agent_engine.stream_query(
@@ -156,8 +260,16 @@ for event in agent_engine.stream_query(
 ## Securing the MCP server
 
 This demo leaves the Cloud Run MCP server publicly reachable
-(`--allow-unauthenticated`) to keep the walkthrough simple. For real use,
-lock it down with Cloud Run's built-in IAM auth instead:
+(`--allow-unauthenticated`) to keep the walkthrough simple.
+
+If you've set up **Agent Gateway** (step 4 above), it is the recommended
+way to secure this in production: authorization is centrally enforced at
+the gateway via `roles/iap.egressor`, so you don't need to hand-manage
+tokens in the agent's own code. You can then also remove
+`--allow-unauthenticated` from the Cloud Run service.
+
+Without Agent Gateway, lock the MCP server down with Cloud Run's built-in
+IAM auth instead:
 
 1. Redeploy without `--allow-unauthenticated` (or run
    `gcloud run services remove-iam-policy-binding ... --member=allUsers`).
@@ -183,7 +295,18 @@ lock it down with Cloud Run's built-in IAM auth instead:
 ## Cleaning up
 
 ```bash
+# Agent Runtime (Agent Engine) resource - replace with your resource name:
+python -c "
+import vertexai
+client = vertexai.Client(project='<PROJECT_ID>', location='us-central1')
+client.agent_engines.delete(name='projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/<ID>')
+"
+
 gcloud run services delete mcp-demo-server --region=us-central1
-# Delete the Agent Engine resource (replace with your resource name):
-python -c "from vertexai import agent_engines; agent_engines.delete('projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/<ID>')"
+
+# If you set up Agent Gateway (step 4):
+gcloud network-services agent-gateways delete mcp-agent-gateway \
+  --project=<PROJECT_ID> --location=us-central1
+gcloud alpha agent-registry services delete mcp-demo-server \
+  --project=<PROJECT_ID> --location=us-central1
 ```
