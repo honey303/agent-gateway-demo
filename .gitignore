@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.adk/
+# rendered from deploy/templates/*.tmpl at run time
+deploy/**/*.yaml

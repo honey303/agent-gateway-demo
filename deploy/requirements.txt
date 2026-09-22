@@ -1,0 +1,4 @@
+# Dependencies for the scripts in this folder (not deployed - these run on
+# your workstation/CI to drive gcloud and the Vertex AI SDK).
+mcp<2
+google-cloud-aiplatform[agent_engines,adk]

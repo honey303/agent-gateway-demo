@@ -1,0 +1,34 @@
+# Template for a Google-managed Agent Gateway in "Client-to-Agent" (ingress)
+# mode - it sits in front of the deployed agent and governs/inspects
+# incoming client requests (e.g. calls to reasoningEngines.query) before
+# they reach Agent Runtime.
+#
+# Unlike the egress gateway, this one does NOT reference Agent Registry -
+# the registry isn't used for ingress - and it MUST be created in the same
+# project and region as the agent (egress gateways may live in a different
+# project, as long as the region matches).
+#
+# Render with envsubst before importing, e.g.:
+#   AGW_NAME=mcp-agent-gateway-ingress envsubst \
+#     < deploy/templates/ingress_gateway.yaml.tmpl > rendered.yaml
+#
+# Reference: https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/set-up-agent-gateway
+#
+# On `protocols: [MCP]` below: this traffic (a client calling
+# reasoningEngines.query) is obviously not MCP wire protocol. It's set to
+# MCP anyway because, per someone who reverse-engineered the actual JSON
+# schema (the import validator echoes its full schema back on a rejected
+# document), `protocols` currently accepts only two enum values for the
+# whole Agent Gateway resource type - MCP and PROTOCOL_UNSPECIFIED - with
+# no distinct value yet for agent-query/A2A-style traffic:
+# https://dev.to/iamrobertmoore/five-things-i-found-in-googles-agent-registry-and-agent-gateway-that-arent-in-the-docs-236f
+# This is a real rough edge on a brand-new (2026) surface, not a
+# deliberate choice on our part. To get 100% ground truth yourself, submit
+# an intentionally-invalid value (e.g. `protocols: [BOGUS]`) with
+# setup_ingress_gateway.sh - the rejected import prints the live schema.
+
+name: ${AGW_NAME}
+protocols:
+  - MCP
+googleManaged:
+  governedAccessPath: CLIENT_TO_AGENT
