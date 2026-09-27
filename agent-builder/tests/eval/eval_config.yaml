@@ -1,0 +1,21 @@
+# Metrics for `agents-cli eval run` on the builder agent itself.
+#
+#   tool_call_match          deterministic: called every tool in the case's
+#                            expected_tool_calls, and none of its
+#                            forbidden_tool_calls? (the same metric every
+#                            generated project gets)
+#   tool_status_match        deterministic: did build_agent / validate_blueprint
+#                            return the status in expected_tool_status?
+#   custom_response_quality  LLM-as-judge, 1-5 (uses the case's reference)
+metrics_to_run:
+  - tool_call_match
+  - tool_status_match
+  - custom_response_quality
+
+custom_metrics:
+  - name: tool_call_match
+    custom_function_file: ../../app/builder/templates/tool_calls.py
+  - name: tool_status_match
+    custom_function_file: tool_status.py
+  - name: custom_response_quality
+    custom_function_file: response_quality.py

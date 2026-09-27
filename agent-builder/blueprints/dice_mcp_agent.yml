@@ -1,0 +1,42 @@
+# The repo's mcp_agent, expressed as a blueprint: an agent whose tools come
+# from the MCP server in ../mcp_server (roll_dice, get_server_time, word_count).
+#
+#   uv run agent-builder build blueprints/dice_mcp_agent.yml -o generated/
+apiVersion: agent-builder/v1
+name: dice-mcp-agent
+description: An assistant that calls tools hosted on a remote MCP server.
+
+deployment:
+  target: agent_runtime
+  region: us-central1
+
+agent:
+  name: mcp_gateway_agent
+  description: An assistant that can call tools hosted on a remote MCP server.
+  instruction: |
+    You are a helpful assistant. You have access to tools served by an
+    external MCP server (dice rolling, the current server time, and word
+    counting). Use them whenever they are relevant to the user's request,
+    and otherwise answer normally.
+  tools:
+    - type: mcp
+      name: demo_mcp
+      url: http://127.0.0.1:8080/mcp
+      url_env: MCP_SERVER_URL
+      auth: auto
+      tool_filter: [roll_dice, get_server_time, word_count]
+
+env:
+  MCP_SERVER_URL: http://127.0.0.1:8080/mcp
+
+evals:
+  - id: roll_d20
+    prompt: Roll a 20-sided die and tell me the result. Use your tools.
+    expected_tool_calls: [roll_dice]
+  - id: count_words
+    prompt: How many words are in "the quick brown fox jumps"?
+    expected_tool_calls: [word_count]
+    reference: There are 5 words.
+  - id: no_tool_needed
+    prompt: What is the capital of France?
+    reference: The capital of France is Paris.

@@ -1,0 +1,145 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "explain_format",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "What goes into an agent-builder blueprint? Give me the main sections."
+          }
+        ]
+      },
+      "expected_tool_calls": [
+        "get_blueprint_reference"
+      ],
+      "forbidden_tool_calls": [
+        "build_agent"
+      ],
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "A blueprint has apiVersion agent-builder/v1, a project name, optional model and deployment (agent_runtime or cloud_run), an agent with instruction, tools (function, mcp, builtin) and sub_agents, plus optional dependencies, env and evals."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "validate_invalid",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Can you check this blueprint for problems?\n\n```yaml\napiVersion: agent-builder/v1\nname: Bad_Name\nagent:\n  instruction: Answer questions.\n```"
+          }
+        ]
+      },
+      "expected_tool_calls": [
+        "validate_blueprint"
+      ],
+      "forbidden_tool_calls": [
+        "build_agent"
+      ],
+      "expected_tool_status": {
+        "validate_blueprint": "invalid"
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "The blueprint is invalid: the name 'Bad_Name' must be lowercase letters, digits and hyphens. Rename it, e.g. to bad-name."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "build_valid",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Build this agent:\n\n```yaml\napiVersion: agent-builder/v1\nname: greeter\ndescription: Greets people in their language.\nagent:\n  instruction: Greet the user. Use greet to build the greeting.\n  tools:\n    - type: function\n      name: greet\n      description: Build a greeting.\n      parameters:\n        - name: person\n          type: string\n          description: Who to greet.\n        - name: language\n          type: string\n          description: en, fr or es.\n          default: en\n      implementation: |\n        words = {\"en\": \"Hello\", \"fr\": \"Bonjour\", \"es\": \"Hola\"}\n        return {\"greeting\": f\"{words.get(language, 'Hello')}, {person}!\"}\nevals:\n  - id: hello\n    prompt: Say hi to Ana in Spanish.\n    expected_tool_calls: [greet]\n```"
+          }
+        ]
+      },
+      "expected_tool_calls": [
+        "build_agent"
+      ],
+      "expected_tool_status": {
+        "build_agent": "success"
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "The greeter project was built with agents-cli and saved as the greeter.zip artifact, including app/agent.py, the eval dataset and tests, with next steps to install, test, evaluate and deploy it."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "build_invalid_reports_errors",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Generate the project for this blueprint:\n\n```yaml\napiVersion: agent-builder/v1\nname: weather-bot\nagent:\n  instruction: Tell people the weather.\n  tools:\n    - type: function\n      name: get_weather\n      description: Weather for a city.\n      parameters:\n        - name: city\nevals:\n  - id: forecast\n    prompt: Weather in Paris?\n    expected_tool_calls: [get_forecast]\n```"
+          }
+        ]
+      },
+      "expected_tool_calls": [
+        "build_agent"
+      ],
+      "expected_tool_status": {
+        "build_agent": "invalid"
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "The build did not happen because the blueprint is invalid: eval case 'forecast' expects tool 'get_forecast', which no agent has. Change it to get_weather."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "draft_from_description",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "I want an agent that converts temperatures between Celsius and Fahrenheit using a Python function tool, deployed on Cloud Run. Draft the blueprint for me but don't build it yet."
+          }
+        ]
+      },
+      "expected_tool_calls": [
+        "validate_blueprint"
+      ],
+      "forbidden_tool_calls": [
+        "build_agent"
+      ],
+      "expected_tool_status": {
+        "validate_blueprint": "valid"
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "A valid blueprint in a yaml block with deployment target cloud_run, a function tool that converts temperatures, and an eval case expecting that tool; the agent offers to build it."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

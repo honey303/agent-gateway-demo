@@ -1,0 +1,75 @@
+# A multi-agent customer-support desk deployed to Cloud Run: a triage agent
+# with function tools and two specialist sub-agents.
+#
+#   uv run agent-builder build blueprints/support_team.yml -o generated/
+apiVersion: agent-builder/v1
+name: support-team
+description: Customer-support triage agent with order-lookup and FAQ specialists.
+model: gemini-3.8-flash
+
+deployment:
+  target: cloud_run
+  region: us-central1
+
+agent:
+  name: triage
+  description: Routes customer questions to the right specialist.
+  instruction: |
+    You are the front desk of an online store. Greet the customer, work out
+    what they need, and transfer to:
+      - orders_specialist for anything about an existing order
+      - faq_specialist for store policies (shipping, returns, warranty)
+    Answer small talk yourself.
+  generation:
+    temperature: 0.1
+  sub_agents:
+    - name: orders_specialist
+      description: Looks up order status and delivery estimates.
+      instruction: |
+        Use lookup_order to answer questions about a specific order. Always
+        ask for the order id if the customer did not give one.
+      tools:
+        - type: function
+          name: lookup_order
+          description: Look up an order by its id.
+          parameters:
+            - name: order_id
+              type: string
+              description: The order id, e.g. A1001.
+          implementation: |
+            orders = {
+                "A1001": {"order_status": "shipped", "eta": "2 days"},
+                "A1002": {"order_status": "processing", "eta": "5 days"},
+            }
+            order = orders.get(order_id.upper())
+            if order is None:
+                return {"status": "not_found", "order_id": order_id}
+            return {"status": "found", "order_id": order_id.upper(), **order}
+    - name: faq_specialist
+      description: Answers store-policy questions.
+      instruction: Answer policy questions using get_policy. Quote the policy text.
+      tools:
+        - type: function
+          name: get_policy
+          description: Return the store policy for a topic.
+          parameters:
+            - name: topic
+              type: string
+              description: One of shipping, returns, warranty.
+          implementation: |
+            policies = {
+                "shipping": "Free shipping on orders over $50; 3-5 business days.",
+                "returns": "Returns accepted within 30 days in original packaging.",
+                "warranty": "All electronics carry a 1-year limited warranty.",
+            }
+            return {"topic": topic, "policy": policies.get(topic.lower(), "No policy found.")}
+
+evals:
+  - id: order_status
+    prompt: Where is my order A1001?
+    expected_tool_calls: [transfer_to_agent, lookup_order]
+    reference: Order A1001 has shipped and should arrive in about 2 days.
+  - id: returns_policy
+    prompt: What's your return policy?
+    expected_tool_calls: [transfer_to_agent, get_policy]
+    reference: Returns are accepted within 30 days in original packaging.

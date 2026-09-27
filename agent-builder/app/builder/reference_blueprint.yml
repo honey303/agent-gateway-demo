@@ -1,0 +1,86 @@
+# Annotated reference blueprint - every field the agent builder understands.
+# Build it with:  uv run agent-builder build app/builder/reference_blueprint.yml
+apiVersion: agent-builder/v1
+
+# Project name: lowercase, digits and hyphens. Becomes the agents-cli project
+# directory and the Cloud Run service / Agent Runtime display name.
+name: trip-helper
+description: Answers travel questions with live search, a currency tool and a weather MCP server.
+
+# Default model for every agent (each agent can override it).
+model: gemini-3.8-flash
+
+deployment:
+  target: agent_runtime        # agent_runtime | cloud_run
+  region: us-central1
+  session_type: in_memory      # in_memory | cloud_sql | agent_platform_sessions
+  agent_gateway: false         # true = trust the Agent Gateway TLS-inspection CA
+
+agent:
+  # Root agent name; defaults to the project name with - replaced by _.
+  name: trip_helper
+  description: Travel assistant.
+  instruction: |
+    You help people plan trips. Use convert_currency for any money
+    conversion and the weather tools for forecasts. Hand research questions
+    to the researcher sub-agent.
+  generation:
+    temperature: 0.2
+  tools:
+    # A Python function. `implementation` is the function body; omit it to
+    # get a stub you fill in later.
+    - type: function
+      name: convert_currency
+      description: Convert an amount between two currencies using fixed demo rates.
+      parameters:
+        - name: amount
+          type: number
+          description: Amount in the source currency.
+        - name: source
+          type: string
+          description: ISO code of the source currency, e.g. USD.
+        - name: target
+          type: string
+          description: ISO code of the target currency, e.g. EUR.
+      implementation: |
+        rates = {"USD": 1.0, "EUR": 0.92, "GBP": 0.79, "JPY": 149.0}
+        if source not in rates or target not in rates:
+            return {"status": "error", "message": f"unsupported currency pair {source}->{target}"}
+        return {"status": "success", "amount": round(amount / rates[source] * rates[target], 2), "currency": target}
+
+    # Tools from a remote MCP server (Streamable HTTP). The URL can be
+    # overridden at runtime with the env var in url_env (default <NAME>_URL).
+    - type: mcp
+      name: weather
+      url: http://127.0.0.1:8080/mcp
+      url_env: WEATHER_MCP_URL
+      auth: auto                 # auto | on | off  (Google ID token for Cloud Run)
+      tool_filter: [get_forecast]
+
+  # Sub-agents the root agent can transfer to. Same shape as `agent`.
+  sub_agents:
+    - name: researcher
+      description: Looks things up on the web.
+      instruction: Answer research questions using Google Search. Cite sources.
+      tools:
+        - type: builtin
+          name: google_search    # google_search | url_context | load_web_page
+
+# Extra PyPI requirements for your function implementations.
+dependencies: []
+
+# Written to the generated project's .env and .env.example.
+env:
+  WEATHER_MCP_URL: http://127.0.0.1:8080/mcp
+
+# Eval cases for `agents-cli eval run`. expected_tool_calls is graded
+# deterministically by the tool_call_match metric; reference feeds the
+# LLM-as-judge response-quality metric.
+evals:
+  - id: currency
+    prompt: How much is 100 USD in EUR?
+    expected_tool_calls: [convert_currency]
+    reference: 100 USD is 92 EUR.
+  - id: research
+    prompt: What is the tallest building in Tokyo?
+    expected_tool_calls: [transfer_to_agent]
